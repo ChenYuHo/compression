@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.9)
+
+project(compress)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_FLAGS "-O3")
+set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
+
+include_directories(include)
+find_package(OpenMP)
+include(CMakeHostSystemInformationExtra)
+include(GetCPUSIMDFeatures)
+include(CMakeCompilerMachineOption)
+set(vendor)
+set(architecture)
+detect_x64_micro_architecture(vendor architecture)
+message(STATUS "Found ${vendor}:${architecture}")
+
+add_executable(compress main.cpp)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(compress PUBLIC OpenMP::OpenMP_CXX)
+endif()
+cmake_compiler_machine_option(ARCHITECTURE_FLAG ${architecture})
+message(STATUS "Use compiler option: ${ARCHITECTURE_FLAG}")
+target_compile_options(compress PRIVATE ${ARCHITECTURE_FLAG})
