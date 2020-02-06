@@ -6,9 +6,11 @@
 #include <cmath>
 #include <random>
 #include <chrono>
-#include "include/simdxorshift128plus.h"
 #include "include/aligned_allocator.h"
 #include "include/cxxopts.h"
+#ifndef NORANDOM
+#include "include/simdxorshift128plus.h"
+#endif
 
 using namespace std;
 using namespace std::chrono;
@@ -18,22 +20,24 @@ ParseResult parse(int argc, char *argv[]) {
     Options options(argv[0], "compression");
     options.add_options()
             ("i,input", "input file name, randomly generate elements if not provided", value<string>())
-            ("o,data-output", "output file name to save data (no-op if given input file)", value<string>())
-            ("r,result-output", "output file name to save compressed result", value<string>())
+            ("o,data-output", "output file name to save original_data (no-op if given input file)",
+             value<string>())
+            ("r,compressed-output", "output file name to save compressed compressed_data", value<string>())
+            ("decompressed-output", "output file name to save decompressed compressed_data", value<string>())
             ("m,method", "compress method", value<string>()->default_value("intml"))
 #ifdef DEBUG
-            ("s,size", "number of float32 elements",
+    ("s,size", "number of float32 elements",
 value<uint32_t>()->default_value("100"))
-            ("repeat", "repeat compression and/or decompression", value<uint32_t>()->default_value("1"))
+    ("repeat", "repeat compression and/or decompression", value<uint32_t>()->default_value("1"))
 #else
             ("s,size", "number of float32 elements",
              value<uint32_t>()->default_value("26214400")) // default: 100 MB
             ("repeat", "repeat compression and/or decompression", value<uint32_t>()->default_value("10"))
 #endif
-            ("p,print", "print data and result")
+            ("p,print", "print original, compressed, and decompressed data")
             ("c,compress", "do and measure compression")
             ("d,decompress", "do and measure decompression")
-            ("h,help", "Print help");
+            ("h,help", "print usage");
     try {
         auto result = options.parse(argc, argv);
         if (result.count("help")) {
@@ -52,13 +56,9 @@ template<typename T>
 class Compressor {
 protected:
     uint32_t num_elements = 0;
-    vector<T, aligned_allocator<T, 64>> data;
+    vector<T, aligned_allocator<T, 64>> original_data;
+    vector<T, aligned_allocator<T, 64>> decompressed_data;
 public:
-    Compressor() = default;
-
-    explicit Compressor(uint32_t num_elements) {
-        this->num_elements = num_elements;
-    };
 
     void read_data(const string &filename) {
         ifstream input(filename);
@@ -67,13 +67,15 @@ public:
             exit(1);
         }
         for (istream_iterator<T> p{input}, e; p != e; ++p) {
-            data.push_back(*p);
+            original_data.push_back(*p);
         }
-        num_elements = data.size();
-        init_result();
+        num_elements = original_data.size();
+        init_compressed_data();
     }
 
-    virtual void init_result() = 0;
+    virtual void init_compressed_data() = 0;
+
+    virtual void init_decompressed_data() = 0;
 
     virtual void generate_data() = 0;
 
@@ -83,25 +85,30 @@ public:
 
     virtual void print() = 0;
 
-    void write_data(const string &filename) {
+    void write_original_data(const string &filename) {
         ofstream file(filename);
-        for (const T &v : this->data) file << v << " ";
+        for (const T &v : original_data) file << v << " ";
         file << endl;
     }
 
-    virtual void write_result(const string &) = 0;
+    void write_decompressed_data(const string &filename) {
+        ofstream file(filename);
+        for (const T &v : decompressed_data) file << v << " ";
+        file << endl;
+    }
+
+    virtual void write_compressed_data(const string &) = 0;
 
 };
 
 class IntMLCompressor :
         public Compressor<float> {
-protected:
-    vector<uint8_t, aligned_allocator<uint8_t, 64>> result;
 public:
+    IntMLCompressor() : Compressor() {};
 
-    IntMLCompressor() = default;
-
-    explicit IntMLCompressor(uint32_t num_elements) : Compressor(num_elements) {};
+    explicit IntMLCompressor(uint32_t num_elements) : IntMLCompressor() {
+        this->num_elements = num_elements;
+    };
 
     void generate_data() override {
         random_device rd;
@@ -110,54 +117,63 @@ public:
         auto gen = [&dist, &e2]() {
             return dist(e2);
         };
-        data.assign(num_elements, 0);
-        init_result();
-        generate(this->data.begin(), this->data.end(), gen);
+        original_data.assign(num_elements, 0);
+        init_compressed_data();
+        generate(original_data.begin(), original_data.end(), gen);
     }
 
-    inline void init_result() override {
-        result.assign(num_elements, 0);
+    inline void init_compressed_data() override {
+        compressed_data.assign(num_elements, 0);
     }
 
-    void write_result(const string &filename) override {
+    inline void init_decompressed_data() override {
+        decompressed_data.assign(num_elements, 0);
+    }
+
+
+    void write_compressed_data(const string &filename) override {
         ofstream file(filename);
-        for (const auto &v : this->result) file << (unsigned) v << " ";
+        for (const auto &v : compressed_data) file << (unsigned) v << " ";
         file << endl;
     }
 
     void print() override {
-        cout << "data:" << endl;
-        for (const auto &v : data) cout << v << " ";
-        cout << endl << "result:" << endl;
-        for (const auto &v : result) cout << (unsigned) v << " ";
+        cout << "original data:" << endl;
+        for (const auto &v : original_data) cout << v << " ";
+        cout << endl << "compressed data:" << endl;
+        for (const auto &v : compressed_data) cout << (unsigned) v << " ";
+        cout << endl << "decompressed data:" << endl;
+        for (const auto &v : decompressed_data) cout << v << " ";
         cout << endl;
+
     }
 
     void compress() override {
-        float *current_data_ptr = this->data.data();
-        uint8_t *current_result_ptr = this->result.data();
+        float *current_data_ptr = original_data.data();
+        uint8_t *current_result_ptr = compressed_data.data();
 
 #pragma omp parallel for default(none) shared(current_data_ptr, current_result_ptr)
         for (unsigned i = 0; i < num_elements / 32; ++i) {
-            fill_avx(current_data_ptr + i * 32, current_result_ptr + i * 32);
+            compress_avx(current_data_ptr + i * 32, current_result_ptr + i * 32);
         }
 
-        unsigned offset = 32 * (this->num_elements / 32);
+        unsigned offset = 32 * (num_elements / 32);
         current_data_ptr += offset;
         current_result_ptr += offset;
 
 #pragma omp parallel for default(none) shared(current_data_ptr, current_result_ptr)
         for (unsigned i = 0; i < num_elements % 32; ++i) {
-            fill_one(current_data_ptr + i, current_result_ptr + i);
+            compress_one(current_data_ptr + i, current_result_ptr + i);
         }
     }
 
 private:
+    vector<uint8_t, aligned_allocator<uint8_t, 64>> compressed_data;
 
     static inline float get_prob(float input) {
         static const uint32_t mask1 = 0x3F800000;
         static const uint32_t mask2 = 0x3FFFFFFF;
-        static union ieee {
+        thread_local static union ieee {
             float f;
             uint32_t i;
         } num;
@@ -167,7 +183,7 @@ private:
         return num.f;
     }
 
-    static inline void fill_one(const float *value, uint8_t *compressed) {
+    static inline void compress_one(const float *value, uint8_t *compressed) {
         thread_local static random_device rd;
         thread_local static mt19937 e2(rd());
         thread_local static uniform_real_distribution<float> dist(1, 2);
@@ -183,8 +199,12 @@ private:
         if (*value < 0) *compressed |= 0x80u;
     }
 
-    static inline void fill_avx(const float *p, uint8_t *exp) {
+    static inline void compress_avx(const float *p, uint8_t *exp) {
+#ifndef NORANDOM
+        thread_local static random_device rd;
         thread_local static avx_xorshift128plus_key_t key;
+        avx_xorshift128plus_init(rd(), rd(), &key);
+#endif
         // load 32 floats
         __m256i a = _mm256_castps_si256(_mm256_loadu_ps(p));
         __m256i b = _mm256_castps_si256(_mm256_loadu_ps(p + 8));
@@ -254,15 +274,98 @@ private:
         // put value sign to MSB
         __m256i abcdsigned = _mm256_or_si256(abcdsign, abcdsaturate);
 
-        // packing will result in different order,
+        // packing will compressed_data in different order,
         // if we do corresponding unpack when decompressing then no need to shuffle
-        const static __m256i shuffleidx = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
-        __m256i abcdordered = _mm256_permutevar8x32_epi32(abcdsigned, shuffleidx);
+        // const static __m256i shuffleidx = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+        // __m256i abcdordered = _mm256_permutevar8x32_epi32(abcdsigned, shuffleidx);
 
-        _mm256_storeu_si256((__m256i *) exp, abcdordered);
+        _mm256_storeu_si256((__m256i *) exp, abcdsigned);
     }
 
-    void decompress() override {}
+    void decompress() override {
+        float *result_ptr = decompressed_data.data();
+        uint8_t *exp_ptr = compressed_data.data();
+
+#pragma omp parallel for default(none) shared(result_ptr, exp_ptr)
+        for (unsigned i = 0; i < num_elements / 32; ++i) {
+            decompress_avx(result_ptr + i * 32, exp_ptr + i * 32);
+        }
+
+        unsigned offset = 32 * (num_elements / 32);
+        result_ptr += offset;
+        exp_ptr += offset;
+
+#pragma omp parallel for default(none) shared(result_ptr, exp_ptr)
+        for (unsigned i = 0; i < num_elements % 32; ++i) {
+            decompress_one(result_ptr + i, exp_ptr + i);
+        }
+    }
+
+    static inline void decompress_one(float *result, const uint8_t *exponent) {
+        if (*exponent == 0) {
+            *result = 0;
+            return;
+        }
+        thread_local static union ieee {
+            float f;
+            uint32_t i;
+        } num;
+        auto sign = (*exponent & 0x80u);
+        num.i = uint32_t((*exponent & 0x7Fu) + 17) << 23u;
+        *result = sign ? -num.f : num.f;
+    }
+
+
+    static void decompress_avx(float *result, const uint8_t *exponent) {
+        // load 32 uint8_t
+        __m256i abcdwsign = _mm256_loadu_si256((__m256i const *) (exponent));
+
+        // unpack to 2 * 16 uint16_t
+        __m256i abwsign = _mm256_unpacklo_epi8(abcdwsign, _mm256_setzero_si256());
+        __m256i cdwsign = _mm256_unpackhi_epi8(abcdwsign, _mm256_setzero_si256());
+
+        // mask out value sign
+        const static __m256i m = _mm256_set1_epi16(0x007F);
+        __m256i abwosign = _mm256_and_si256(abwsign, m);
+        __m256i cdwosign = _mm256_and_si256(cdwsign, m);
+
+        // if exponent is 0, the decompressed value should be 0
+        __m256i abiszero = _mm256_cmpeq_epi16(abwosign, _mm256_setzero_si256());
+        __m256i cdiszero = _mm256_cmpeq_epi16(cdwosign, _mm256_setzero_si256());
+
+        // add 17 (127-110) to get the original exponent
+        const static __m256i seventeen = _mm256_set1_epi16(17);
+        __m256i abexp = _mm256_add_epi16(abwosign, seventeen);
+        __m256i cdexp = _mm256_add_epi16(cdwosign, seventeen);
+
+        // move sign to 9th bit, mask out others
+        __m256i absign = _mm256_slli_epi16(_mm256_srli_epi16(abwsign, 7), 8);
+        __m256i cdsign = _mm256_slli_epi16(_mm256_srli_epi16(cdwsign, 7), 8);
+
+        // put value sign back to 9th bit
+        __m256i absignexp = _mm256_or_si256(abexp, absign);
+        __m256i cdsignexp = _mm256_or_si256(cdexp, cdsign);
+
+        // set zero, _mm256_andnot_si256(A, B) performs bitwise ((not A) and B)
+        __m256i absignexp_with_zero = _mm256_andnot_si256(abiszero, absignexp);
+        __m256i cdsignexp_with_zero = _mm256_andnot_si256(cdiszero, cdsignexp);
+
+        // shift 23 left, cast back to float
+        __m256 a = _mm256_castsi256_ps(
+                _mm256_slli_epi32(_mm256_unpacklo_epi16(absignexp_with_zero, _mm256_setzero_si256()), 23));
+        __m256 b = _mm256_castsi256_ps(
+                _mm256_slli_epi32(_mm256_unpackhi_epi16(absignexp_with_zero, _mm256_setzero_si256()), 23));
+        __m256 c = _mm256_castsi256_ps(
+                _mm256_slli_epi32(_mm256_unpacklo_epi16(cdsignexp_with_zero, _mm256_setzero_si256()), 23));
+        __m256 d = _mm256_castsi256_ps(
+                _mm256_slli_epi32(_mm256_unpackhi_epi16(cdsignexp_with_zero, _mm256_setzero_si256()), 23));
+
+        // store floats back
+        _mm256_storeu_ps(result, a);
+        _mm256_storeu_ps(result + 8, b);
+        _mm256_storeu_ps(result + 16, c);
+        _mm256_storeu_ps(result + 24, d);
+    }
 };
 
 void do_work(const ParseResult &result, Compressor<float> &compressor) {
@@ -274,34 +377,38 @@ void do_work(const ParseResult &result, Compressor<float> &compressor) {
     uint32_t count = result["repeat"].as<uint32_t>();
     uint32_t num_elements = result["size"].as<uint32_t>();
     if (result.count("compress")) {
-        for (unsigned i = 1; i <= count; ++i){
+        for (unsigned i = 1; i <= count; ++i) {
+            compressor.init_compressed_data();
             high_resolution_clock::time_point begin = high_resolution_clock::now();
             compressor.compress();
             high_resolution_clock::time_point end = high_resolution_clock::now();
-            auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
-            printf("compress round %d: %ld microseconds elapsed, %f element/s\n",
-                   i, us_taken, num_elements * 1e6 * count / us_taken);
+            auto ns_taken = duration_cast<nanoseconds>(end - begin).count();
+            cout << "compress round " << i << ": " << ns_taken << " nanoseconds elapsed, "
+                 << double(num_elements) / ns_taken * 1e9 << " element/s\n";
         }
     }
     if (result.count("decompress")) {
-        for (unsigned i = 1; i <= count; ++i){
+        for (unsigned i = 1; i <= count; ++i) {
+            compressor.init_decompressed_data();
             high_resolution_clock::time_point begin = high_resolution_clock::now();
             compressor.decompress();
             high_resolution_clock::time_point end = high_resolution_clock::now();
-            auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
-            printf("decompress round %d: %ld microseconds elapsed, %f element/s\n",
-                    i, us_taken, num_elements * 1e6 * count / us_taken);
-            compressor.init_result();
+            auto ns_taken = duration_cast<nanoseconds>(end - begin).count();
+            cout << "decompress round " << i << ": " << ns_taken << " nanoseconds elapsed, "
+                 << double(num_elements) / ns_taken * 1e9 << " element/s\n";
         }
     }
     if (result["print"].as<bool>() && !result.count("no-print")) {
         compressor.print();
     }
     if (!result.count("input") && result.count("data-output")) {
-        compressor.write_data(result["data-output"].as<string>());
+        compressor.write_original_data(result["data-output"].as<string>());
     }
-    if (result.count("result-output")) {
-        compressor.write_result(result["result-output"].as<string>());
+    if (result.count("compressed-output")) {
+        compressor.write_compressed_data(result["compressed-output"].as<string>());
+    }
+    if (result.count("decompressed-output")) {
+        compressor.write_decompressed_data(result["decompressed-output"].as<string>());
     }
 }
 
