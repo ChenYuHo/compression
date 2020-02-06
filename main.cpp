@@ -17,22 +17,20 @@ using namespace cxxopts;
 ParseResult parse(int argc, char *argv[]) {
     Options options(argv[0], "compression");
     options.add_options()
-#ifdef DEBUG
-    ("s,size", "number of float32 elements",
-     value<uint32_t>()->default_value("100"))
-#else
-            ("s,size", "number of float32 elements",
-             value<uint32_t>()->default_value("26214400")) // default: 100 MB
-#endif
             ("i,input", "input file name, randomly generate elements if not provided", value<string>())
             ("o,data-output", "output file name to save data (no-op if given input file)", value<string>())
             ("r,result-output", "output file name to save compressed result", value<string>())
             ("m,method", "compress method", value<string>()->default_value("intml"))
 #ifdef DEBUG
-            ("repeat", "repeat ", value<uint32_t>()->default_value("1"))
+            ("s,size", "number of float32 elements",
+value<uint32_t>()->default_value("100"))
+            ("repeat", "repeat compression and/or decompression", value<uint32_t>()->default_value("1"))
 #else
+            ("s,size", "number of float32 elements",
+             value<uint32_t>()->default_value("26214400")) // default: 100 MB
             ("repeat", "repeat compression and/or decompression", value<uint32_t>()->default_value("10"))
 #endif
+            ("p,print", "print data and result")
             ("c,compress", "do and measure compression")
             ("d,decompress", "do and measure decompression")
             ("h,help", "Print help");
@@ -72,16 +70,18 @@ public:
             data.push_back(*p);
         }
         num_elements = data.size();
-        init_result(num_elements);
+        init_result();
     }
 
-    virtual void init_result(uint32_t) = 0;
+    virtual void init_result() = 0;
 
     virtual void generate_data() = 0;
 
     virtual void compress() = 0;
 
     virtual void decompress() = 0;
+
+    virtual void print() = 0;
 
     void write_data(const string &filename) {
         ofstream file(filename);
@@ -111,11 +111,11 @@ public:
             return dist(e2);
         };
         data.assign(num_elements, 0);
-        init_result(num_elements);
+        init_result();
         generate(this->data.begin(), this->data.end(), gen);
     }
 
-    inline void init_result(uint32_t num_elements) override {
+    inline void init_result() override {
         result.assign(num_elements, 0);
     }
 
@@ -125,12 +125,15 @@ public:
         file << endl;
     }
 
+    void print() override {
+        cout << "data:" << endl;
+        for (const auto &v : data) cout << v << " ";
+        cout << endl << "result:" << endl;
+        for (const auto &v : result) cout << (unsigned) v << " ";
+        cout << endl;
+    }
+
     void compress() override {
-#ifdef DEBUG
-        cout<<"before compression:"<<endl;
-        for (const float &v : this->data) cout << v << " ";
-        cout<<endl;
-#endif
         float *current_data_ptr = this->data.data();
         uint8_t *current_result_ptr = this->result.data();
 
@@ -147,11 +150,6 @@ public:
         for (unsigned i = 0; i < num_elements % 32; ++i) {
             fill_one(current_data_ptr + i, current_result_ptr + i);
         }
-#ifdef DEBUG
-        cout<<"after compression:"<<endl;
-        for (const unsigned &v : this->result) cout << v << " ";
-        cout<<endl;
-#endif
     }
 
 private:
@@ -276,22 +274,28 @@ void do_work(const ParseResult &result, Compressor<float> &compressor) {
     uint32_t count = result["repeat"].as<uint32_t>();
     uint32_t num_elements = result["size"].as<uint32_t>();
     if (result.count("compress")) {
-        high_resolution_clock::time_point begin = high_resolution_clock::now();
-        for (unsigned i = 0; i < count; ++i)
+        for (unsigned i = 1; i <= count; ++i){
+            high_resolution_clock::time_point begin = high_resolution_clock::now();
             compressor.compress();
-        high_resolution_clock::time_point end = high_resolution_clock::now();
-        auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
-        cout << "compress: " << us_taken << " microseconds "
-             << num_elements * 1e6 * count / us_taken << " CTE/s" << endl;
+            high_resolution_clock::time_point end = high_resolution_clock::now();
+            auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
+            printf("compress round %d: %ld microseconds elapsed, %f element/s\n",
+                   i, us_taken, num_elements * 1e6 * count / us_taken);
+        }
     }
     if (result.count("decompress")) {
-        high_resolution_clock::time_point begin = high_resolution_clock::now();
-        for (unsigned i = 0; i < count; ++i)
+        for (unsigned i = 1; i <= count; ++i){
+            high_resolution_clock::time_point begin = high_resolution_clock::now();
             compressor.decompress();
-        high_resolution_clock::time_point end = high_resolution_clock::now();
-        auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
-        cout << "decompress: " << us_taken << " microseconds "
-             << num_elements * 1e6 * count / us_taken << " CTE/s" << endl;
+            high_resolution_clock::time_point end = high_resolution_clock::now();
+            auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
+            printf("decompress round %d: %ld microseconds elapsed, %f element/s\n",
+                    i, us_taken, num_elements * 1e6 * count / us_taken);
+            compressor.init_result();
+        }
+    }
+    if (result["print"].as<bool>() && !result.count("no-print")) {
+        compressor.print();
     }
     if (!result.count("input") && result.count("data-output")) {
         compressor.write_data(result["data-output"].as<string>());
