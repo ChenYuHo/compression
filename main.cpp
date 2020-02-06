@@ -60,7 +60,6 @@ public:
 
     explicit Compressor(uint32_t num_elements) {
         this->num_elements = num_elements;
-        data.assign(num_elements, 0);
     };
 
     void read_data(const string &filename) {
@@ -69,7 +68,9 @@ public:
             cerr << filename << " does not exist" << endl;
             exit(1);
         }
-        copy(istream_iterator<T>(input), istream_iterator<T>(), data.data());
+        for (istream_iterator<T> p{input}, e; p != e; ++p) {
+            data.push_back(*p);
+        }
         this->num_elements = data.size();
     }
 
@@ -81,7 +82,8 @@ public:
 
     void write_data(const string &filename) {
         ofstream file(filename);
-        for (const auto &v : this->data) file << v << "\n";
+        for (const T &v : this->data) file << v << " ";
+        file << endl;
     }
 
     virtual void write_result(const string &) = 0;
@@ -107,12 +109,14 @@ public:
         auto gen = [&dist, &e2]() {
             return dist(e2);
         };
+        data.assign(num_elements, 0);
         generate(this->data.begin(), this->data.end(), gen);
     }
 
     void write_result(const string &filename) override {
         ofstream file(filename);
-        for (const auto &v : this->result) file << (unsigned) v << "\n";
+        for (const auto &v : this->result) file << (unsigned) v << " ";
+        file << endl;
     }
 
     void compress() override {
@@ -278,7 +282,7 @@ void do_work(const ParseResult &result, Compressor<float> &compressor) {
         high_resolution_clock::time_point end = high_resolution_clock::now();
         auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
         cout << "compress: " << us_taken << " microseconds "
-             << num_elements * 1e6 * count / us_taken  << " CTE/s" << endl;
+             << num_elements * 1e6 * count / us_taken << " CTE/s" << endl;
     }
     if (result.count("decompress")) {
         high_resolution_clock::time_point begin = high_resolution_clock::now();
@@ -289,11 +293,11 @@ void do_work(const ParseResult &result, Compressor<float> &compressor) {
         cout << "decompress: " << us_taken << " microseconds "
              << num_elements * 1e6 * count / us_taken << " CTE/s" << endl;
     }
-    if (!result.count("input") && result.count("output")) {
-        compressor.write_data(result["output"].as<string>());
+    if (!result.count("input") && result.count("data-output")) {
+        compressor.write_data(result["data-output"].as<string>());
     }
-    if (result.count("compressed-output")) {
-        compressor.write_result(result["compressed-output"].as<string>());
+    if (result.count("result-output")) {
+        compressor.write_result(result["result-output"].as<string>());
     }
 }
 
