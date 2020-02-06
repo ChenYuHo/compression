@@ -19,6 +19,7 @@ Usage:
   -r, --result-output arg  output file name to save compressed result
   -m, --method arg         compress method (default: intml)
   --repeat arg             repeat compression and/or decompression (default: 10)
+  -p, --print              print data and result
   -c, --compress           do and measure compression
   -d, --decompress         do and measure decompression
   -h, --help               Print help
