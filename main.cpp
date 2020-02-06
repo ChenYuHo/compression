@@ -31,7 +31,7 @@ ParseResult parse(int argc, char *argv[]) {
 #ifdef DEBUG
             ("repeat", "repeat ", value<uint32_t>()->default_value("1"))
 #else
-            ("repeat", "repeat ", value<uint32_t>()->default_value("10"))
+            ("repeat", "repeat compression and/or decompression", value<uint32_t>()->default_value("10"))
 #endif
             ("c,compress", "do and measure compression")
             ("d,decompress", "do and measure decompression")
