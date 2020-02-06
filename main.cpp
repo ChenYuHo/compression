@@ -71,8 +71,11 @@ public:
         for (istream_iterator<T> p{input}, e; p != e; ++p) {
             data.push_back(*p);
         }
-        this->num_elements = data.size();
+        num_elements = data.size();
+        init_result(num_elements);
     }
+
+    virtual void init_result(uint32_t) = 0;
 
     virtual void generate_data() = 0;
 
@@ -98,9 +101,7 @@ public:
 
     IntMLCompressor() = default;
 
-    explicit IntMLCompressor(uint32_t num_elements) : Compressor(num_elements) {
-        result.assign(num_elements, 0);
-    };
+    explicit IntMLCompressor(uint32_t num_elements) : Compressor(num_elements) {};
 
     void generate_data() override {
         random_device rd;
@@ -110,7 +111,12 @@ public:
             return dist(e2);
         };
         data.assign(num_elements, 0);
+        init_result(num_elements);
         generate(this->data.begin(), this->data.end(), gen);
+    }
+
+    inline void init_result(uint32_t num_elements) override {
+        result.assign(num_elements, 0);
     }
 
     void write_result(const string &filename) override {
