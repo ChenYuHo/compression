@@ -3,7 +3,7 @@
 #include <fstream>
 #include <iterator>
 #include <immintrin.h>
-#include <math.h>
+#include <cmath>
 #include <random>
 #include <chrono>
 #include "include/simdxorshift128plus.h"
@@ -23,7 +23,7 @@ ParseResult parse(int argc, char *argv[]) {
             ("o,data-output", "output file name to save data (no-op if given input file)", value<string>())
             ("r,result-output", "output file name to save compressed result", value<string>())
             ("m,method", "compress method", value<string>()->default_value("intml"))
-            ("repeat", "repeat ", value<float>()->default_value("10"))
+            ("repeat", "repeat ", value<uint32_t>()->default_value("10"))
             ("c,compress", "do and measure compression")
             ("d,decompress", "do and measure decompression")
             ("h,help", "Print help");
@@ -103,7 +103,7 @@ public:
 
     void write_result(const string &filename) override {
         ofstream file(filename);
-        for (const unsigned &v : this->result) file << v << "\n";
+        for (const auto &v : this->result) file << (unsigned) v << "\n";
     }
 
     void compress() override {
@@ -112,15 +112,20 @@ public:
         for (const float &v : this->data) cout << v << " ";
         cout<<endl;
 #endif
-#pragma omp parallel for
-        for (int i = this->num_elements / 32 - 1; i >= 0; --i) {
-            fill_avx(this->data.data() + i * 32, this->result.data() + i * 32);
+        float *current_data_ptr = this->data.data();
+        uint8_t *current_result_ptr = this->result.data();
+
+#pragma omp parallel for default(none) shared(current_data_ptr, current_result_ptr)
+        for (unsigned i = 0; i < num_elements / 32; ++i) {
+            fill_avx(current_data_ptr + i * 32, current_result_ptr + i * 32);
         }
+
         unsigned offset = 32 * (this->num_elements / 32);
-        float *current_data_ptr = this->data.data() + offset;
-        uint8_t *current_result_ptr = this->result.data() + offset;
-#pragma omp parallel for
-        for (int i = this->num_elements % 32 - 1; i >= 0; --i) {
+        current_data_ptr += offset;
+        current_result_ptr += offset;
+
+#pragma omp parallel for default(none) shared(current_data_ptr, current_result_ptr)
+        for (unsigned i = 0; i < num_elements % 32; ++i) {
             fill_one(current_data_ptr + i, current_result_ptr + i);
         }
 #ifdef DEBUG
@@ -132,7 +137,7 @@ public:
 
 private:
 
-    inline float get_prob(float input) {
+    static inline float get_prob(float input) {
         static const uint32_t mask1 = 0x3F800000;
         static const uint32_t mask2 = 0x3FFFFFFF;
         static union ieee {
@@ -145,12 +150,12 @@ private:
         return num.f;
     }
 
-    inline void fill_one(const float *value, uint8_t *result) {
+    static inline void fill_one(const float *value, uint8_t *compressed) {
         thread_local static random_device rd;
         thread_local static mt19937 e2(rd());
         thread_local static uniform_real_distribution<float> dist(1, 2);
         if (*value == 0) {
-            *result = 0x40;
+            *compressed = 0x40;
             return;
         }
         int8_t exp = ilogbf(*value);
@@ -159,13 +164,13 @@ private:
 #else
         if (1.5 < get_prob(*value)) exp+=1; // add 1
 #endif
-        if (exp >= 10) *result = 60;
-        else if (exp <= -50) *result = 0;
-        else *result = uint8_t(exp + 50);
-        if (*value < 0) *result |= 0x80;
+        if (exp >= 10) *compressed = 60;
+        else if (exp <= -50) *compressed = 0;
+        else *compressed = uint8_t(exp + 50);
+        if (*value < 0) *compressed |= 0x80u;
     }
 
-    inline void fill_avx(const float *p, uint8_t *exp) {
+    static inline void fill_avx(const float *p, uint8_t *exp) {
         thread_local static avx_xorshift128plus_key_t key;
         // load 32 floats
         __m256i a = _mm256_castps_si256(_mm256_loadu_ps(p));
@@ -255,7 +260,7 @@ void do_work(const ParseResult &result, Compressor<float> &compressor) {
     } else {
         compressor.generate_data();
     }
-    float count = result["repeat"].as<float>();
+    uint32_t count = result["repeat"].as<uint32_t>();
     uint32_t num_elements = result["size"].as<uint32_t>();
     if (result.count("compress")) {
         high_resolution_clock::time_point begin = high_resolution_clock::now();
