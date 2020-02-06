@@ -18,8 +18,8 @@ ParseResult parse(int argc, char *argv[]) {
     Options options(argv[0], "compression");
     options.add_options()
 #ifdef DEBUG
-            ("s,size", "number of float32 elements",
-             value<uint32_t>()->default_value("100"))
+    ("s,size", "number of float32 elements",
+     value<uint32_t>()->default_value("100"))
 #else
             ("s,size", "number of float32 elements",
              value<uint32_t>()->default_value("26214400")) // default: 100 MB
@@ -191,32 +191,31 @@ private:
         __m256i c = _mm256_castps_si256(_mm256_loadu_ps(p + 16));
         __m256i d = _mm256_castps_si256(_mm256_loadu_ps(p + 24));
 
-        // mask 23bits
-        const static __m256i m = _mm256_set1_epi32(0x007fffff);
-
         // mask out sign and exponent, only leave mantissa
+        const static __m256i m = _mm256_set1_epi32(0x007fffff);
         __m256i am = _mm256_and_si256(a, m);
         __m256i bm = _mm256_and_si256(b, m);
         __m256i cm = _mm256_and_si256(c, m);
         __m256i dm = _mm256_and_si256(d, m);
 
 #ifndef NORANDOM
-        // if am larger than random numbers
+        // stochastic rounding
+        // true if mantissa larger than a random number (exp should +1)
         __m256i aa = _mm256_cmpgt_epi32(am, _mm256_and_si256(avx_xorshift128plus(&key), m));
         __m256i bb = _mm256_cmpgt_epi32(bm, _mm256_and_si256(avx_xorshift128plus(&key), m));
         __m256i cc = _mm256_cmpgt_epi32(cm, _mm256_and_si256(avx_xorshift128plus(&key), m));
         __m256i dd = _mm256_cmpgt_epi32(dm, _mm256_and_si256(avx_xorshift128plus(&key), m));
 #else
-        // rounding
+        // deterministic rounding
         const static __m256i round = _mm256_set1_epi32(0x00400000);
-        // comparing only mantissa doesn't raise sign issues
         __m256i aa = _mm256_cmpgt_epi32(am, round);
         __m256i bb = _mm256_cmpgt_epi32(bm, round);
         __m256i cc = _mm256_cmpgt_epi32(cm, round);
         __m256i dd = _mm256_cmpgt_epi32(dm, round);
 #endif
 
-        // shift right (zero extending), only sign and exponent left, add one if am larger than ar (undefined behavior if float is Inf)
+        // shift right (fill zeros) so that only sign and exponent left
+        // add 1 to exp accordingly (undefined behavior if float is Inf)
         const static __m256i one = _mm256_set1_epi32(1);
         __m256i aexp = _mm256_add_epi32(_mm256_srli_epi32(a, 23), _mm256_and_si256(aa, one));
         __m256i bexp = _mm256_add_epi32(_mm256_srli_epi32(b, 23), _mm256_and_si256(bb, one));
@@ -227,12 +226,12 @@ private:
         __m256i ab = _mm256_packus_epi32(aexp, bexp);
         __m256i cd = _mm256_packus_epi32(cexp, dexp);
 
-        // save sign and put to the 8th bit
+        // save sign and put to the MSB (8th)
         __m256i absign = _mm256_slli_epi16(_mm256_srli_epi16(ab, 8), 7);
         __m256i cdsign = _mm256_slli_epi16(_mm256_srli_epi16(cd, 8), 7);
         __m256i abcdsign = _mm256_packus_epi16(absign, cdsign);
 
-        // mask out sign
+        // mask out sign (becuase _mm256_packus_epi16 saturates signed word to unsigned byte)
         const static __m256i m2 = _mm256_set1_epi16(0x00FF);
         __m256i abmasksign = _mm256_and_si256(ab, m2);
         __m256i cdmasksign = _mm256_and_si256(cd, m2);
@@ -240,28 +239,26 @@ private:
         // pack as 32 uint8_t
         __m256i abcd = _mm256_packus_epi16(abmasksign, cdmasksign);
 
-        // check 0 for later use
-        __m256i abcdiszero = _mm256_cmpeq_epi8(abcd, _mm256_setzero_si256());
+        // we want to use MSB for value sign, so choose to preserve exponent -110 ~ 17
+        // and treat exponent -110 (and below) as value 0
+        //        exponent:    -128    -110      -109      17     127
+        // view as uint8_t:       0      18        19     145     255
+        //   use only 7bit:       0       0         1     127     127
+        //    decompressed:       0       0    2^-109    2^17    2^17
 
-        // -50 + 127, smallest to represent 2^-50
-        const static __m256i seventyseven = _mm256_set1_epi8(77);
-        // biggest to represent 2^10 is 60 (10+127-77), so to saturate, 255-60=195
-        const static __m256i onenintyfive = _mm256_set1_epi8(195);
+        // saturate to 18~145
+        const static __m256i oneten = _mm256_set1_epi8(110); // 255-145
+        const static __m256i onetwentyeight = _mm256_set1_epi8(128); //110+18
+        __m256i abcdsaturate = _mm256_subs_epu8(_mm256_adds_epu8(abcd, oneten), onetwentyeight);
+        // put value sign to MSB
+        __m256i abcdsigned = _mm256_or_si256(abcdsign, abcdsaturate);
 
-        __m256i abcdshift = _mm256_subs_epu8(abcd, seventyseven); // saturate lower
-        __m256i abcdsaturate = _mm256_subs_epu8(_mm256_adds_epu8(abcdshift, onenintyfive),
-                                                onenintyfive); // saturate upper
-        __m256i abcdsigned = _mm256_or_si256(abcdsign, abcdsaturate); // append sign
+        // packing will result in different order,
+        // if we do corresponding unpack when decompressing then no need to shuffle
+        const static __m256i shuffleidx = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+        __m256i abcdordered = _mm256_permutevar8x32_epi32(abcdsigned, shuffleidx);
 
-        // set 7th bit if value is zero
-        const static __m256i seventhbit = _mm256_set1_epi8(0x40);
-        __m256i abcdsigned_with_zero = _mm256_or_si256(abcdsigned, _mm256_and_si256(abcdiszero, seventhbit));
-
-        // packing will result in different order, but we unpack when storing so no need to shuffle
-        // const static __m256i shuffleidx = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
-        // __m256i abcdordered = _mm256_permutevar8x32_epi32(abcdsigned_with_zero, shuffleidx);
-
-        _mm256_storeu_si256((__m256i *) exp, abcdsigned_with_zero);
+        _mm256_storeu_si256((__m256i *) exp, abcdordered);
     }
 
     void decompress() override {}
