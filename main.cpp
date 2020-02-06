@@ -17,13 +17,22 @@ using namespace cxxopts;
 ParseResult parse(int argc, char *argv[]) {
     Options options(argv[0], "compression");
     options.add_options()
+#ifdef DEBUG
+            ("s,size", "number of float32 elements",
+             value<uint32_t>()->default_value("100"))
+#else
             ("s,size", "number of float32 elements",
              value<uint32_t>()->default_value("26214400")) // default: 100 MB
+#endif
             ("i,input", "input file name, randomly generate elements if not provided", value<string>())
             ("o,data-output", "output file name to save data (no-op if given input file)", value<string>())
             ("r,result-output", "output file name to save compressed result", value<string>())
             ("m,method", "compress method", value<string>()->default_value("intml"))
+#ifdef DEBUG
+            ("repeat", "repeat ", value<uint32_t>()->default_value("1"))
+#else
             ("repeat", "repeat ", value<uint32_t>()->default_value("10"))
+#endif
             ("c,compress", "do and measure compression")
             ("d,decompress", "do and measure decompression")
             ("h,help", "Print help");
@@ -267,18 +276,18 @@ void do_work(const ParseResult &result, Compressor<float> &compressor) {
         for (unsigned i = 0; i < count; ++i)
             compressor.compress();
         high_resolution_clock::time_point end = high_resolution_clock::now();
-        auto ms_taken = duration_cast<milliseconds>(end - begin).count() / count;
-        cout << "compress: " << ms_taken << " ms "
-             << num_elements * count / ms_taken * 1000 << " CTE/s" << endl;
+        auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
+        cout << "compress: " << us_taken << " microseconds "
+             << num_elements * 1e6 * count / us_taken  << " CTE/s" << endl;
     }
     if (result.count("decompress")) {
         high_resolution_clock::time_point begin = high_resolution_clock::now();
         for (unsigned i = 0; i < count; ++i)
             compressor.decompress();
         high_resolution_clock::time_point end = high_resolution_clock::now();
-        auto ms_taken = duration_cast<milliseconds>(end - begin).count() / count;
-        cout << "decompress: " << ms_taken << " ms "
-             << num_elements * count / ms_taken * 1000 << " CTE/s" << endl;
+        auto us_taken = duration_cast<microseconds>(end - begin).count() / count;
+        cout << "decompress: " << us_taken << " microseconds "
+             << num_elements * 1e6 * count / us_taken << " CTE/s" << endl;
     }
     if (!result.count("input") && result.count("output")) {
         compressor.write_data(result["output"].as<string>());
