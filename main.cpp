@@ -173,19 +173,15 @@ private:
         thread_local static random_device rd;
         thread_local static mt19937 e2(rd());
         thread_local static uniform_real_distribution<float> dist(1, 2);
-        if (*value == 0) {
-            *compressed = 0x40;
-            return;
-        }
         int8_t exp = ilogbf(*value);
 #ifndef NORANDOM
         if (dist(e2) < get_prob(*value)) exp += 1; // add 1
 #else
         if (1.5 < get_prob(*value)) exp+=1; // add 1
 #endif
-        if (exp >= 10) *compressed = 60;
-        else if (exp <= -50) *compressed = 0;
-        else *compressed = uint8_t(exp + 50);
+        if (exp >= 17) *compressed = 127;
+        else if (exp <= -110 || *value == 0) *compressed = 0;
+        else *compressed = uint8_t(exp + 110);
         if (*value < 0) *compressed |= 0x80u;
     }
 
@@ -245,17 +241,18 @@ private:
         // pack as 32 uint8_t
         __m256i abcd = _mm256_packus_epi16(abmasksign, cdmasksign);
 
-        // we want to use MSB for value sign, so choose to preserve exponent -110 ~ 17
-        // and treat exponent -110 (and below) as value 0
-        //        exponent:    -128    -110      -109      17     127
-        // view as uint8_t:       0      18        19     145     255
-        //   use only 7bit:       0       0         1     127     127
-        //    decompressed:       0       0    2^-109    2^17    2^17
+        // we want to use MSB for value sign, so choose to preserve exponent -109 ~ 17
+        // and treat exponent -110 (and below) as value 0, 18 (and above) as value 2^17
+        //        exponent:    below    -110      -109      0      17      18    above
+        // view as uint8_t:      <17      17        18    127     144     145     >145
+        //  +110(saturate):     <127     127       128    237     254     255      255
+        //  -127(saturate):        0       0         1    110     127     127      127
+        //    decompressed:        0       0    2^-109    2^0    2^17    2^17     2^17
 
-        // saturate to 18~145
+        // saturate to 17~145
         const static __m256i oneten = _mm256_set1_epi8(110); // 255-145
-        const static __m256i onetwentyeight = _mm256_set1_epi8(128); //110+18
-        __m256i abcdsaturate = _mm256_subs_epu8(_mm256_adds_epu8(abcd, oneten), onetwentyeight);
+        const static __m256i onetwentyseven = _mm256_set1_epi8(127);
+        __m256i abcdsaturate = _mm256_subs_epu8(_mm256_adds_epu8(abcd, oneten), onetwentyseven);
         // put value sign to MSB
         __m256i abcdsigned = _mm256_or_si256(abcdsign, abcdsaturate);
 
