@@ -8,6 +8,13 @@ cmake .. [-DDEBUG=1] [-DNORANDOM=1]
 make
 ```
 
+## Test
+```bash
+# after cmake
+make test
+./test
+```
+
 ## Run
 ```
 Usage:
