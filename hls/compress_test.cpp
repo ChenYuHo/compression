@@ -2,6 +2,8 @@
 #include <cmath>
 #include <random>
 
+#include "compress.hpp"
+
 #define NUM_ELEMENTS 100
 
 static inline uint8_t sw_compress_one(float input) {
@@ -24,68 +26,61 @@ static inline uint8_t sw_compress_one(float input) {
     return result;
 }
 
-static inline float sw_decompress_one(uint8_t input) {
-    if (input == 0) {
-        return 0.;
-    }
-    static union ieee {
-        float f;
-        uint32_t i;
-    } num;
-    uint8_t sign = (input & 0x80u);
-    num.i = uint32_t((input & 0x7Fu) + 17) << 23u;
-    return sign ? -num.f : num.f;
-}
 
 int main(void) {
-    float testinputs[NUM_ELEMENTS];
-    uint8_t swresults[NUM_ELEMENTS];
-//    ap_int<8> hwcomp[NUM_ELEMENTS];
+	float testinputs[NUM_ELEMENTS];
+	uint8_t swresults[NUM_ELEMENTS];
+	ap_int<8> hwcomp[NUM_ELEMENTS];
 
-    // random number generator
-    std::random_device rd;
-    std::mt19937 e2(rd());
-    std::normal_distribution<float> dist(0., 5.);
+	std::random_device rd;
+	std::mt19937 e2(rd());
+	std::normal_distribution<float> dist(0., 5.);
 
-    unsigned error_count = 0;
+	unsigned error_count = 0;
 
-    // Generate test vectors and expected results
-    for (int i = 0; i < NUM_ELEMENTS; i++) {
-        // also test 0
-        if (i == 0) testinputs[i] = 0;
-        else testinputs[i] = dist(e2);
-        swresults[i] = sw_compress_one(testinputs[i]);
-    }
+	// Generate test vectors and expected results
+	for (int i = 0; i < NUM_ELEMENTS; i++) {
+		// also test 0
+		if (i == 0) testinputs[i] = 0;
+		else testinputs[i] = dist(e2);
+		printf("%f  ",testinputs[i]);
+		swresults[i] = sw_compress_one(testinputs[i]);
+		printf("%u\n",swresults[i]);
 
-    // Run the accelerator
+	}
 
-    // Check accelerator outputs
-    for (int i = 0; i < NUM_ELEMENTS; i++) {
-        auto decompressed = sw_decompress_one(swresults[i]);
+	// Run the accelerator
+	for (int i = 0; i < NUM_ELEMENTS; i++) {
+		compress_one(&(testinputs[i]), &(hwcomp[i]));
+	}
 
-        // compute correct answer
-        int exp;
-        float frac = frexpf(testinputs[i], &exp);
-        if (frac > 0) {
-            if (frac > 0.75) frac = 1;
-            else frac = 0.5;
-        } else if (frac < 0) {
-            if (frac < -0.75) frac = -1;
-            else frac = -0.5;
-        }
-        float answer = ldexpf(frac, exp);
-        if (decompressed != answer) {
-            // printf("original %f, should get %f, but got %f\n", testinputs[i], answer, decompressed);
-            error_count += 1;
-        }
-    }
+	// Check accelerator outputs
+	for (int i = 0; i < NUM_ELEMENTS; i++) {
+		printf("SW:%d    HW:%d\n", swresults[i], (uint8_t) hwcomp[i]);
+		if (swresults[i] != (uint8_t) hwcomp[i])
+			error_count += 1;
+	}
 
-    // Print final test status
-    if (error_count) {
-        std::cout << "!!! TEST FAILED - " << error_count;
-        std::cout << " results incorrect." << std::endl;
-    } else
-        std::cout << "Test Passed" << std::endl;
 
-    return error_count;
+	// Print final test status
+	if (error_count) {
+		std::cout << "!!! TEST FAILED - " << error_count;
+		std::cout << " results incorrect." << std::endl;
+	} else
+		std::cout << "Test Passed" << std::endl;
+
+	return error_count;
 }
+
+
+//void generate_data() {
+//	std::random_device rd;
+//	std::mt19937 e2(rd());
+//	std::normal_distribution<float> dist(0., 0.001);
+//	auto gen = [&dist, &e2]() {
+//		return dist(e2);
+//    };
+//	original_data.assign(NUM_ELEMENTS, 0);
+//	init_compressed_data();
+//	generate(original_data.begin(), original_data.end(), gen);
+//}
