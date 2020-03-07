@@ -30,7 +30,10 @@ static inline uint8_t sw_compress_one(float input) {
 int main(void) {
 	float testinputs[NUM_ELEMENTS];
 	uint8_t swresults[NUM_ELEMENTS];
-	ap_int<8> hwcomp[NUM_ELEMENTS];
+	uint8_t hwcomp[NUM_ELEMENTS];
+
+	hls::stream<apuint32_t> floatstream;
+	hls::stream<uint8_t> compstream;
 
 	std::random_device rd;
 	std::mt19937 e2(rd());
@@ -49,9 +52,21 @@ int main(void) {
 
 	}
 
+	// Load test vectors into stream object
+	for (int i = 0; i < NUM_ELEMENTS; i++) {
+		float inval = testinputs[i];
+		ap_uint<32> intVal = *(ap_uint<32>*) &inval;
+		floatstream.write(intVal);
+	}
+
 	// Run the accelerator
 	for (int i = 0; i < NUM_ELEMENTS; i++) {
-		compress_one(&(testinputs[i]), &(hwcomp[i]));
+		compress_one(floatstream, compstream);
+	}
+
+	// Unload results from stream object
+	for (int i = 0; i < NUM_ELEMENTS; i++) {
+			compstream.read(hwcomp[i]);
 	}
 
 	// Check accelerator outputs
