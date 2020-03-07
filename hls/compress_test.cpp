@@ -33,7 +33,7 @@ int main(void) {
 	uint8_t hwcomp[NUM_ELEMENTS];
 
 	hls::stream<apuint32_t> floatstream;
-	hls::stream<uint8_t> compstream;
+	hls::stream<apuint8_t> compstream;
 
 	std::random_device rd;
 	std::mt19937 e2(rd());
@@ -46,9 +46,9 @@ int main(void) {
 		// also test 0
 		if (i == 0) testinputs[i] = 0;
 		else testinputs[i] = dist(e2);
-		printf("%f  ",testinputs[i]);
+//		printf("%f  ",testinputs[i]);
 		swresults[i] = sw_compress_one(testinputs[i]);
-		printf("%u\n",swresults[i]);
+//		printf("%u\n",swresults[i]);
 
 	}
 
@@ -66,7 +66,7 @@ int main(void) {
 
 	// Unload results from stream object
 	for (int i = 0; i < NUM_ELEMENTS; i++) {
-			compstream.read(hwcomp[i]);
+		hwcomp[i] = (uint8_t)compstream.read();
 	}
 
 	// Check accelerator outputs
