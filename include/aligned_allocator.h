@@ -5,6 +5,7 @@
 #include <malloc.h>
 #endif
 
+#include <stddef.h>
 #include <cstdint>
 #include <vector>
 #include <iostream>

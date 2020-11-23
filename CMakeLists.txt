@@ -13,7 +13,7 @@ if(NORANDOM)
     add_definitions(-DNORANDOM)
 endif()
 
-add_executable(test hls/compress_test.cpp)
+#add_executable(test hls/compress_test.cpp)
 add_executable(compress main.cpp)
 if(TARGET compress)
     find_package(OpenMP)
