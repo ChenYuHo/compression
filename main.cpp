@@ -2,15 +2,10 @@
 #include <vector>
 #include <fstream>
 #include <iterator>
-#include <immintrin.h>
 #include <cmath>
 #include <random>
 #include <chrono>
-#include "include/aligned_allocator.h"
 #include "include/cxxopts.h"
-#ifndef NORANDOM
-#include "include/simdxorshift128plus.h"
-#endif
 
 using namespace std;
 using namespace std::chrono;
@@ -56,8 +51,8 @@ template<typename T>
 class Compressor {
 protected:
     uint32_t num_elements = 0;
-    vector<T, aligned_allocator<T, 64>> original_data;
-    vector<T, aligned_allocator<T, 64>> decompressed_data;
+    vector<T> original_data;
+    vector<T> decompressed_data;
 public:
 
     void read_data(const string &filename) {
@@ -152,23 +147,13 @@ public:
         float *current_data_ptr = original_data.data();
         uint8_t *current_result_ptr = compressed_data.data();
 
-#pragma omp parallel for default(none) shared(current_data_ptr, current_result_ptr)
-        for (unsigned i = 0; i < num_elements / 32; ++i) {
-            compress_avx(current_data_ptr + i * 32, current_result_ptr + i * 32);
-        }
-
-        unsigned offset = 32 * (num_elements / 32);
-        current_data_ptr += offset;
-        current_result_ptr += offset;
-
-#pragma omp parallel for default(none) shared(current_data_ptr, current_result_ptr)
-        for (unsigned i = 0; i < num_elements % 32; ++i) {
+        for (unsigned i = 0; i < num_elements; ++i) {
             compress_one(current_data_ptr + i, current_result_ptr + i);
         }
     }
 
 private:
-    vector<uint8_t, aligned_allocator<uint8_t, 64>> compressed_data;
+    vector<uint8_t> compressed_data;
 
     static inline float get_prob(float input) {
         static const uint32_t mask1 = 0x3F800000;
@@ -199,104 +184,11 @@ private:
         if (*value < 0) *compressed |= 0x80u;
     }
 
-    static inline void compress_avx(const float *p, uint8_t *exp) {
-#ifndef NORANDOM
-        thread_local static random_device rd;
-        thread_local static avx_xorshift128plus_key_t key;
-        avx_xorshift128plus_init(rd(), rd(), &key);
-#endif
-        // load 32 floats
-        __m256i a = _mm256_castps_si256(_mm256_loadu_ps(p));
-        __m256i b = _mm256_castps_si256(_mm256_loadu_ps(p + 8));
-        __m256i c = _mm256_castps_si256(_mm256_loadu_ps(p + 16));
-        __m256i d = _mm256_castps_si256(_mm256_loadu_ps(p + 24));
-
-        // mask out sign and exponent, only leave mantissa
-        const static __m256i m = _mm256_set1_epi32(0x007fffff);
-        __m256i am = _mm256_and_si256(a, m);
-        __m256i bm = _mm256_and_si256(b, m);
-        __m256i cm = _mm256_and_si256(c, m);
-        __m256i dm = _mm256_and_si256(d, m);
-
-#ifndef NORANDOM
-        // stochastic rounding
-        // true if mantissa larger than a random number (exp should +1)
-        __m256i aa = _mm256_cmpgt_epi32(am, _mm256_and_si256(avx_xorshift128plus(&key), m));
-        __m256i bb = _mm256_cmpgt_epi32(bm, _mm256_and_si256(avx_xorshift128plus(&key), m));
-        __m256i cc = _mm256_cmpgt_epi32(cm, _mm256_and_si256(avx_xorshift128plus(&key), m));
-        __m256i dd = _mm256_cmpgt_epi32(dm, _mm256_and_si256(avx_xorshift128plus(&key), m));
-#else
-        // deterministic rounding
-        const static __m256i round = _mm256_set1_epi32(0x00400000);
-        __m256i aa = _mm256_cmpgt_epi32(am, round);
-        __m256i bb = _mm256_cmpgt_epi32(bm, round);
-        __m256i cc = _mm256_cmpgt_epi32(cm, round);
-        __m256i dd = _mm256_cmpgt_epi32(dm, round);
-#endif
-
-        // shift right (fill zeros) so that only sign and exponent left
-        // add 1 to exp accordingly (undefined behavior if float is Inf)
-        const static __m256i one = _mm256_set1_epi32(1);
-        __m256i aexp = _mm256_add_epi32(_mm256_srli_epi32(a, 23), _mm256_and_si256(aa, one));
-        __m256i bexp = _mm256_add_epi32(_mm256_srli_epi32(b, 23), _mm256_and_si256(bb, one));
-        __m256i cexp = _mm256_add_epi32(_mm256_srli_epi32(c, 23), _mm256_and_si256(cc, one));
-        __m256i dexp = _mm256_add_epi32(_mm256_srli_epi32(d, 23), _mm256_and_si256(dd, one));
-
-        // pack as 16 uint16_t
-        __m256i ab = _mm256_packus_epi32(aexp, bexp);
-        __m256i cd = _mm256_packus_epi32(cexp, dexp);
-
-        // save sign and put to the MSB (8th)
-        __m256i absign = _mm256_slli_epi16(_mm256_srli_epi16(ab, 8), 7);
-        __m256i cdsign = _mm256_slli_epi16(_mm256_srli_epi16(cd, 8), 7);
-        __m256i abcdsign = _mm256_packus_epi16(absign, cdsign);
-
-        // mask out sign (becuase _mm256_packus_epi16 saturates signed word to unsigned byte)
-        const static __m256i m2 = _mm256_set1_epi16(0x00FF);
-        __m256i abmasksign = _mm256_and_si256(ab, m2);
-        __m256i cdmasksign = _mm256_and_si256(cd, m2);
-
-        // pack as 32 uint8_t
-        __m256i abcd = _mm256_packus_epi16(abmasksign, cdmasksign);
-
-        // we want to use MSB for value sign, so choose to preserve exponent -109 ~ 17
-        // and treat exponent -110 (and below) as value 0, 18 (and above) as value 2^17
-        //        exponent:    below    -110      -109      0      17      18    above
-        // view as uint8_t:      <17      17        18    127     144     145     >145
-        //  +110(saturate):     <127     127       128    237     254     255      255
-        //  -127(saturate):        0       0         1    110     127     127      127
-        //    decompressed:        0       0    2^-109    2^0    2^17    2^17     2^17
-
-        // saturate to 17~145
-        const static __m256i oneten = _mm256_set1_epi8(110); // 255-145
-        const static __m256i onetwentyseven = _mm256_set1_epi8(127);
-        __m256i abcdsaturate = _mm256_subs_epu8(_mm256_adds_epu8(abcd, oneten), onetwentyseven);
-        // put value sign to MSB
-        __m256i abcdsigned = _mm256_or_si256(abcdsign, abcdsaturate);
-
-        // packing will compressed_data in different order,
-        // if we do corresponding unpack when decompressing then no need to shuffle
-        // const static __m256i shuffleidx = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
-        // __m256i abcdordered = _mm256_permutevar8x32_epi32(abcdsigned, shuffleidx);
-
-        _mm256_storeu_si256((__m256i *) exp, abcdsigned);
-    }
-
     void decompress() override {
         float *result_ptr = decompressed_data.data();
         uint8_t *exp_ptr = compressed_data.data();
 
-#pragma omp parallel for default(none) shared(result_ptr, exp_ptr)
-        for (unsigned i = 0; i < num_elements / 32; ++i) {
-            decompress_avx(result_ptr + i * 32, exp_ptr + i * 32);
-        }
-
-        unsigned offset = 32 * (num_elements / 32);
-        result_ptr += offset;
-        exp_ptr += offset;
-
-#pragma omp parallel for default(none) shared(result_ptr, exp_ptr)
-        for (unsigned i = 0; i < num_elements % 32; ++i) {
+        for (unsigned i = 0; i < num_elements; ++i) {
             decompress_one(result_ptr + i, exp_ptr + i);
         }
     }
@@ -313,58 +205,6 @@ private:
         auto sign = (*exponent & 0x80u);
         num.i = uint32_t((*exponent & 0x7Fu) + 17) << 23u;
         *result = sign ? -num.f : num.f;
-    }
-
-
-    static void decompress_avx(float *result, const uint8_t *exponent) {
-        // load 32 uint8_t
-        __m256i abcdwsign = _mm256_loadu_si256((__m256i const *) (exponent));
-
-        // unpack to 2 * 16 uint16_t
-        __m256i abwsign = _mm256_unpacklo_epi8(abcdwsign, _mm256_setzero_si256());
-        __m256i cdwsign = _mm256_unpackhi_epi8(abcdwsign, _mm256_setzero_si256());
-
-        // mask out value sign
-        const static __m256i m = _mm256_set1_epi16(0x007F);
-        __m256i abwosign = _mm256_and_si256(abwsign, m);
-        __m256i cdwosign = _mm256_and_si256(cdwsign, m);
-
-        // if exponent is 0, the decompressed value should be 0
-        __m256i abiszero = _mm256_cmpeq_epi16(abwosign, _mm256_setzero_si256());
-        __m256i cdiszero = _mm256_cmpeq_epi16(cdwosign, _mm256_setzero_si256());
-
-        // add 17 (127-110) to get the original exponent
-        const static __m256i seventeen = _mm256_set1_epi16(17);
-        __m256i abexp = _mm256_add_epi16(abwosign, seventeen);
-        __m256i cdexp = _mm256_add_epi16(cdwosign, seventeen);
-
-        // move sign to 9th bit, mask out others
-        __m256i absign = _mm256_slli_epi16(_mm256_srli_epi16(abwsign, 7), 8);
-        __m256i cdsign = _mm256_slli_epi16(_mm256_srli_epi16(cdwsign, 7), 8);
-
-        // put value sign back to 9th bit
-        __m256i absignexp = _mm256_or_si256(abexp, absign);
-        __m256i cdsignexp = _mm256_or_si256(cdexp, cdsign);
-
-        // set zero, _mm256_andnot_si256(A, B) performs bitwise ((not A) and B)
-        __m256i absignexp_with_zero = _mm256_andnot_si256(abiszero, absignexp);
-        __m256i cdsignexp_with_zero = _mm256_andnot_si256(cdiszero, cdsignexp);
-
-        // shift 23 left, cast back to float
-        __m256 a = _mm256_castsi256_ps(
-                _mm256_slli_epi32(_mm256_unpacklo_epi16(absignexp_with_zero, _mm256_setzero_si256()), 23));
-        __m256 b = _mm256_castsi256_ps(
-                _mm256_slli_epi32(_mm256_unpackhi_epi16(absignexp_with_zero, _mm256_setzero_si256()), 23));
-        __m256 c = _mm256_castsi256_ps(
-                _mm256_slli_epi32(_mm256_unpacklo_epi16(cdsignexp_with_zero, _mm256_setzero_si256()), 23));
-        __m256 d = _mm256_castsi256_ps(
-                _mm256_slli_epi32(_mm256_unpackhi_epi16(cdsignexp_with_zero, _mm256_setzero_si256()), 23));
-
-        // store floats back
-        _mm256_storeu_ps(result, a);
-        _mm256_storeu_ps(result + 8, b);
-        _mm256_storeu_ps(result + 16, c);
-        _mm256_storeu_ps(result + 24, d);
     }
 };
 
