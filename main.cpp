@@ -9,24 +9,12 @@
 using namespace std;
 using namespace std::chrono;
 
-float get_prob(float input) {
-    static const uint32_t mask1 = 0x3F800000;
-    static const uint32_t mask2 = 0x3FFFFFFF;
-    thread_local static union ieee {
-        float f;
-        uint32_t i;
-    } num;
-    num.f = input;
-    num.i |= mask1;
-    num.i &= mask2;
-    return num.f;
-}
-
-uint8_t compress_one_pure(const float value) {
-    int8_t exp = ilogbf(value);
+// random is (1.0, 2.0]
+uint8_t compress_one_pure(const float value, const float random) {
+    int exp;
+    float prob = abs(frexpf(value, &exp));
     uint8_t compressed;
-    //if (1.5 < get_prob(value)) exp+=1; // add 1
-    if (rand() / float(RAND_MAX) + 1.0 < get_prob(value)) exp+=1;
+    if (random > prob*2.) exp-=1;
     if (exp >= 17) compressed = 127;
     else if (exp <= -110 || value == 0) compressed = 0;
     else compressed = uint8_t(exp + 110);
@@ -34,9 +22,9 @@ uint8_t compress_one_pure(const float value) {
     return compressed;
 }
 
-void compress(float *input, uint8_t *output, int num_elements) {
+void compress(float *input, uint8_t *output, float *randoms, int num_elements) {
     for (unsigned i = 0; i < num_elements; ++i) {
-        output[i] = compress_one_pure(input[i]);
+        output[i] = compress_one_pure(input[i], randoms[i]);
     }
 }
 
@@ -68,14 +56,19 @@ int main(int argc, char *argv[]) {
     data.reserve(num_elements);
     vector<uint8_t> compressed(num_elements);
     vector<float> decompressed(num_elements);
+    vector<float> randoms;
+    randoms.reserve(num_elements);
     for(unsigned i = 0; i < num_elements; ++i) {
         data.push_back(float(i));
+        randoms.push_back((rand()+1) / (float(RAND_MAX)+1.0) + 1.0);
     }
     //for (const auto &v : data) cout << v << " ";
     //cout << endl;
+    //for (const auto &v : randoms) cout << v << " ";
+    //cout << endl;
     for (unsigned i = 1; i <= count; ++i) {
         high_resolution_clock::time_point begin = high_resolution_clock::now();
-        compress(data.data(), compressed.data(), num_elements);
+        compress(data.data(), compressed.data(), randoms.data(), num_elements);
         high_resolution_clock::time_point end = high_resolution_clock::now();
         auto ns_taken = duration_cast<nanoseconds>(end - begin).count();
         cout << "compress round " << i << ": " << ns_taken << " nanoseconds elapsed, "
@@ -93,23 +86,6 @@ int main(int argc, char *argv[]) {
         //for (const auto &v : decompressed) cout << v << " ";
         //cout << endl;
     }
-//    int r = rand();      // Returns a pseudo-random integer between 0 and RAND_MAX.
     return 0;
 }
-
-
-
-
-
-
- //   void print() override {
- //       cout << "original data:" << endl;
- //       for (const auto &v : original_data) cout << v << " ";
- //       cout << endl << "compressed data:" << endl;
- //       for (const auto &v : compressed_data) cout << (unsigned) v << " ";
- //       cout << endl << "decompressed data:" << endl;
- //       for (const auto &v : decompressed_data) cout << v << " ";
- //       cout << endl;
-
- //   }
 
