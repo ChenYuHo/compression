@@ -32,3 +32,9 @@ Usage:
   -d, --decompress               do and measure decompression
   -h, --help                     print usage
 ```
+
+## CUDA
+```
+nvcc -O3 cnat.cu -o cnat_cuda -lcurand
+./cnat_cuda
+```
